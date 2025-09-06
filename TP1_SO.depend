@@ -1,0 +1,6 @@
+# depslib dependency file v1.0
+1757183165 source:c:\users\jorge\onedrive\documentos\algorithms and data structure\ejercicios\tp1_so\main.c
+	<stdio.h>
+	<stdlib.h>
+	<pthread.h>
+
