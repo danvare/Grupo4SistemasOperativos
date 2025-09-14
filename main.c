@@ -1,83 +1,11 @@
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <string.h>
-#include <semaphore.h>
+#define BATCH 10
 
+pthread_mutex_t printeo = PTHREAD_MUTEX_INITIALIZER;
 
-// Definición de la estructura del nodo
-typedef struct Nodo {
-    int dato;
-    struct Nodo *siguiente;
-} Nodo;
-
-// Definición de la estructura de la cola
-typedef struct Cola {
-    Nodo *frente;
-    Nodo *final;
-} Cola;
-
-Cola* crear_cola() {
-    Cola *q = (Cola*) malloc(sizeof(Cola));
-    if (q == NULL) {
-        printf("Error: No se pudo asignar memoria para la cola.\n");
-        exit(1);
-    }
-    q->frente = NULL;
-    q->final = NULL;
-    return q;
-}
-
-void encolar(Cola *q, void *valor, size_t tamano_dato) {
-    Nodo *nuevo_nodo = (Nodo*) malloc(sizeof(Nodo));
-    if (nuevo_nodo == NULL) {
-        perror("Error: No se pudo asignar memoria para el nuevo nodo");
-        exit(1);
-    }
-
-    (nuevo_nodo)->dato = malloc(tamano_dato);
-    if (nuevo_nodo->dato == NULL) {
-        perror("Error: No se pudo asignar memoria para el dato");
-        free(nuevo_nodo);
-        exit(1);
-    }
-
-    // Copia el dato al nuevo nodo
-    memcpy(nuevo_nodo->dato, valor, tamano_dato);
-    nuevo_nodo->siguiente = NULL;
-
-    if (q->final == NULL) {
-        q->frente = nuevo_nodo;
-        q->final = nuevo_nodo;
-    } else {
-        q->final->siguiente = nuevo_nodo;
-        q->final = nuevo_nodo;
-    }
-}
-
-void* desencolar(Cola *q) {
-    if (q->frente == NULL) {
-        return NULL; // Devuelve NULL si la cola está vacía
-    }
-
-    Nodo *nodo_a_eliminar = q->frente;
-    void *dato_a_devolver = nodo_a_eliminar->dato;
-    q->frente = q->frente->siguiente;
-
-    if (q->frente == NULL) {
-        q->final = NULL;
-    }
-
-    free(nodo_a_eliminar);
-    return dato_a_devolver;
-}
-
-int esta_vacia(Cola *q) {
-    return (q->frente == NULL);
-}
-
-
-typedef struct 
+typedef struct
 {
     int id;
     char Estado;
@@ -89,92 +17,96 @@ typedef struct
 // C Critico
 // R Reservado
 
-char opcionRandom (){
-  char estado[4] = "SNCR";
-  return estado[(rand()%4)];
+char opcionRandom ()
+{
+    char estado[4] = "SNCR";
+    return estado[(rand()%4)];
 }
 
+typedef struct
+{
+    long next_id;     // arranca en 1
+    long max_id;      // total a generar
+    pthread_mutex_t m;
+} Coordinador;
 
-void* tarea(void* args){
-    // int id = *(int*)args;
-    // printf("Tarea hilo ID: %d\n", id);
+typedef struct
+{
+    int id_hilo;
+    Coordinador* coord;
+    // acá podrías tener referencia a la cola de “registros” hacia el escritor CSV
+} Args;
 
-    Cola* cola = (Cola*)args;
-
-    Producto* vector = (Producto*)desencolar(cola);
-    int cant = *(int*)desencolar(cola);
-
-    for (int i = cant; i < cant+10; i++)
+void coord_init(Coordinador* c, long total)
+{
+    c->next_id = 1;
+    c->max_id  = total;
+    pthread_mutex_init(&c->m, NULL);
+}
+// Devuelve cuántos IDs concedió (0 si no quedan). Llena out[0..n-1]
+int pedir_bloque(Coordinador* c, long out[BATCH])
+{
+    pthread_mutex_lock(&c->m);
+    if (c->next_id > c->max_id)
     {
-        vector[i].id = i;
-        vector[i].Estado = opcionRandom();
-    }
-    
-    encolar(cola, &vector, sizeof(Producto)*10);
-    encolar(cola, &cant,sizeof(int));
-
-    return args;
-}
-
-int main() {
-    pthread_t* vthread; //Hilo Coordinador
-    int pg = 0, i, *ids;
-    Producto vectorProd[10];
-    int cantidadRegistros = 0;
-
-    Cola* cola = crear_cola();
-
-    encolar(cola, &vectorProd, sizeof(Producto)*10);
-    encolar(cola, &cantidadRegistros, sizeof(int));
-
-    printf("Cuantos procesos generadores quiere inicializar?\n");
-    scanf("%d", &pg);
-
-    vthread = malloc(sizeof(pthread_t)* pg);
-    ids = malloc(pg* sizeof(int));
-    if(!vthread || !ids){
-        free(vthread);
-        free(ids);
+        pthread_mutex_unlock(&c->m);
         return 0;
     }
-
-    for(i = 0; i < pg; i++){
-        ids[i] = i;
-        if(pthread_create(&vthread[i], NULL, tarea, &cola) != 0 ){
-            perror("thread create");
-            free(vthread);
-            free(ids);
-            return 1;
-        }
-
-        Producto* vectorProdAux = (Producto*)desencolar(cola);
-        cantidadRegistros = *(int*)desencolar(cola);
-
-        cantidadRegistros+=10;
-
-        encolar(cola,&vectorProdAux,sizeof(Producto)*10);
-        encolar(cola, &cantidadRegistros, sizeof(int));
-    }
-
-    for(int j = 0; j < pg; j++){
-        pthread_join(vthread[j], NULL);
-    }
-    free(ids);
-    free(vthread);
-    //registro coordinador -> padre //COLA -> ?
-    //generar los procesos con pid 0 - 10 que producen datos de prueba // Cantidad procesos generadores
-    //funciones asignan y escriben archivos csv
-
-    Producto* vectorProdAux = (Producto*)desencolar(cola);
-    cantidadRegistros = *(int*)desencolar(cola);
-
-    for (int i = 0; i < cantidadRegistros; i++)
+    long start = c->next_id;
+    long remaining = c->max_id - start + 1;
+    int give = (remaining >= BATCH) ? BATCH : (int)remaining;
+    for (int i = 0; i < give; ++i)
     {
-        printf("VectorProdAux id = %d",vectorProdAux->id);
-        printf("VectoProdAux estado = %c", vectorProdAux->Estado);
+        out[i] = c->next_id++;
     }
-    
-    scanf("%d", &pg);
+    pthread_mutex_unlock(&c->m);
+    return give;
+}
 
+
+void* generador(void* p)
+{
+    Producto prod;
+    Args* a = (Args*)p;
+    long bloque[BATCH];
+    for (;;)
+    {
+        int n = pedir_bloque(a->coord, bloque);
+        if (n == 0) break; // no hay más IDs → terminar
+        // Producís n registros con esos IDs (puede ser aleatorio el resto de campos)
+        for (int i = 0; i < n; ++i)
+        {
+            long id = bloque[i];
+            prod.id = id;
+            prod.Estado = opcionRandom();
+            // TODO: llenar Producto con 'id' y otros campos aleatorios
+            // TODO: enviar registro al coordinador-escritor por otra cola/SHM
+            // (por ahora, demostremos que no hay duplicados)
+            // printf("[gen %d] ID=%ld\n", a->id_hilo, id);
+            // crear mutex cuando se genera el csv (la razon viene en que cada proceso puede entrar a memoria compartida de manera aleatoria).
+            //
+            printf("ID: %d | ESTADO: %c\n", prod.id, prod.Estado);
+        }
+    }
+    return NULL;
+}
+
+int main()
+{
+    int pg = 4;            // procesos/hilos generadores
+    long total = 95;       // total de registros (IDs 1..95)
+    pthread_t th[pg];
+    Args args[pg];
+    Coordinador coord;
+    coord_init(&coord, total);
+    for (int i = 0; i < pg; ++i)
+    {
+        args[i].id_hilo = i;
+        args[i].coord = &coord;
+        pthread_create(&th[i], NULL, generador, &args[i]);
+    }
+    for (int i = 0; i < pg; ++i) pthread_join(th[i], NULL);
+    // acá te faltaría el lado escritor CSV, que va consumiendo registros
+    // en el orden que lleguen (no hace falta que queden ordenados)
     return 0;
 }
