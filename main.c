@@ -113,7 +113,8 @@ void* generador(void* p)
             long id = bloque[i];
             prod.id = id;
             prod.cantidad = opcionRandomCantidad();
-            prod.Estado = obtenerEstado(prod.cantidad);
+            prod.Estado =
+            (prod.cantidad);
             opcionNombreRandom(prod.nombre);
 
 
@@ -141,7 +142,7 @@ int main() {
     scanf("%d",&pg);
 
     puts("Ingresar numero de registros totales");
-    scanf("%d",&total);
+    scanf("%ld",&total);
 
     pthread_t th[pg];
     Args args[pg];
