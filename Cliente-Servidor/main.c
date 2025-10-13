@@ -1,60 +1,114 @@
 // gcc -pthread server.c -o server
 #define _GNU_SOURCE
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
-#include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "../Producto.h"
+#include "../listaDinamica.h"
+
+#ifdef __linux__
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#elif defined(_WIN32) || defined(_WIN64)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 
 // ====== Estado global (reutiliza tu loader) ======
-char** g_lista_productos = NULL;
-int g_num_productos = 0;
+tLista g_lista_productos = NULL;
 pthread_mutex_t g_productos_mutex;   // protege memoria en COMMIT
 sem_t g_sem_conc;                    // limita concurrencia real
 const char* NOMBRE_ARCHIVO = "productos.csv";
 
-// ====== Loader (igual al tuyo) ======
-int cargar_productos_desde_csv(void) {
-    FILE* archivo = fopen(NOMBRE_ARCHIVO, "r+");
-    if (!archivo) { printf("Archivo '%s' no encontrado\n", NOMBRE_ARCHIVO); return 0; }
-    char linea[1024];
-    while (fgets(linea, sizeof(linea), archivo)) {
-        linea[strcspn(linea, "\r\n")] = 0;
-        if (!*linea) continue;
-        char** nuevo = realloc(g_lista_productos, sizeof(char*) * (g_num_productos + 1));
-        if (!nuevo) { perror("realloc"); exit(1); }
-        g_lista_productos = nuevo;
-        g_lista_productos[g_num_productos] = strdup(linea);
-        if (!g_lista_productos[g_num_productos]) { perror("strdup"); exit(1); }
-        g_num_productos++;
+// Helpers para manipular tLista localmente
+static int lista_contar(tLista *pl) {
+    int cnt = 0;
+    tNodo *p = *pl;
+    while (p) { cnt++; p = p->sig; }
+    return cnt;
+}
+
+static Producto* lista_get(tLista *pl, int idx) {
+    int i = 0;
+    tNodo *p = *pl;
+    while (p) {
+        if (i == idx) return (Producto*)p->info;
+        i++; p = p->sig;
     }
-    fclose(archivo);
-    printf("Se cargaron %d productos desde '%s'.\n", g_num_productos, NOMBRE_ARCHIVO);
+    return NULL;
+}
+
+// Use the list API from listaDinamica: poner_en_lista already inserts appropriately
+
+
+// Cargar productos en una lista dinámica (tLista) usando las funciones del módulo listaDinamica
+int cargar_productos_en_lista(tLista *pl) {
+    FILE* f = fopen(NOMBRE_ARCHIVO, "r");
+    if (!f) { perror("fopen productos.csv"); return 0; }
+
+    crear_lista(pl);
+    char linea[1024];
+    Producto prod;
+
+    while (fgets(linea, sizeof linea, f)) {
+        if (leerProductoDeLineaCSV(linea, &prod)) {
+            if (poner_en_lista(pl, &prod, sizeof(Producto)) != TODO_OK) {
+                // fallo memoria: limpiar y salir
+                destruir_lista(pl);
+                fclose(f);
+                return 0;
+            }
+        }
+    }
+
+    fclose(f);
     return 1;
 }
 
-static int persistir_csv_bloqueado_exclusivo(char** lista, int n) {
+// wrapper que usa la lista global
+int cargar_productos_desde_csv(void) {
+    return cargar_productos_en_lista(&g_lista_productos);
+}
+
+static int persistir_csv_bloqueado_exclusivo_lista(tLista *pl) {
     int fd = open(NOMBRE_ARCHIVO, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { perror("open"); return -1; }
+#ifdef __linux__
     if (flock(fd, LOCK_EX) < 0) { perror("flock LOCK_EX"); close(fd); return -1; }
+#endif
 
     // Escribimos atómicamente todo
     FILE* f = fdopen(fd, "a");
-    if (!f) { perror("fdopen"); flock(fd, LOCK_UN); close(fd); return -1; }
-    for (int i = 0; i < n; i++) fprintf(f, "%s\n", lista[i]);
+    if (!f) { perror("fdopen");
+#ifdef __linux__
+        flock(fd, LOCK_UN);
+#endif
+        close(fd); return -1; }
+
+    // iterar la lista y escribir cada producto
+    tNodo *p = *pl;
+    while (p) {
+        Producto *pr = (Producto*)p->info;
+        escribirProductoEnCSV(f, pr);
+        p = p->sig;
+    }
+
     fflush(f);
     fsync(fd);
     // Desbloqueo y cierre
+#ifdef __linux__
     flock(fd, LOCK_UN);
+#endif
     fclose(f); // cierra también fd
     return 0;
 }
@@ -88,10 +142,9 @@ void* client_thread(void* arg) {
     // Control de concurrencia real
     sem_wait(&g_sem_conc);
 
-    // Estado de transacción por cliente
+    // Estado de transacción por cliente (snapshot como tLista)
     bool in_tx = false;
-    char** shadow = NULL; // snapshot/buffer de trabajo
-    int shadow_n = 0;
+    tLista shadow = NULL; // lista temporal de Producto
 
     send_line(sock, "Bienvenido. Comandos: BEGIN, GET idx, LIST, ADD texto, COMMIT TRANSACTION, ROLLBACK, QUIT\n");
 
@@ -108,9 +161,13 @@ void* client_thread(void* arg) {
             if (in_tx) { send_line(sock, "ERR Ya en transaccion\n"); continue; }
             // Crear snapshot de trabajo (lecturas y cambios locales)
             pthread_mutex_lock(&g_productos_mutex);
-            shadow_n = g_num_productos;
-            shadow = malloc(sizeof(char*) * shadow_n);
-            for (int i = 0; i < shadow_n; i++) shadow[i] = strdup(g_lista_productos[i]);
+            // copiar cada Producto de g_lista_productos a shadow
+            tNodo *p = g_lista_productos;
+            while (p) {
+                Producto *orig = (Producto*)p->info;
+                poner_en_lista(&shadow, orig, sizeof(Producto));
+                p = p->sig;
+            }
             pthread_mutex_unlock(&g_productos_mutex);
             in_tx = true;
             send_line(sock, "OK BEGIN\n");
@@ -118,8 +175,17 @@ void* client_thread(void* arg) {
         } else if (!strncmp(line, "LIST", 4)) {
             char msg[64];
             if (in_tx) {
-                snprintf(msg, sizeof msg, "OK %d items (TX)\n", shadow_n); send_line(sock, msg);
-                for (int i = 0; i < shadow_n; i++) { send_line(sock, shadow[i]); send_line(sock, "\n"); }
+                int cnt = lista_contar(&shadow);
+                snprintf(msg, sizeof msg, "OK %d items (TX)\n", cnt); send_line(sock, msg);
+                for (int i = 0; i < cnt; i++) {
+                    Producto *pr = lista_get(&shadow, i);
+                    if (pr) {
+                        char buf[256];
+                        // formatear como CSV (mismo formato que escribirProductoEnCSV)
+                        snprintf(buf, sizeof buf, "%d,%s,%c,%d\n", pr->id, pr->nombre, pr->Estado, pr->cantidad);
+                        send_line(sock, buf);
+                    }
+                }
             } else {
                 send_line(sock, "ERR Usar BEGIN primero\n");
                 continue;
@@ -128,8 +194,9 @@ void* client_thread(void* arg) {
         } else if (!strncmp(line, "GET ", 4)) {
             int idx = atoi(line + 4);
             if (in_tx) {
-                if (idx < 0 || idx >= shadow_n) { send_line(sock, "ERR idx\n"); }
-                else { send_line(sock, "OK "); send_line(sock, shadow[idx]); send_line(sock, "\n"); }
+                Producto *pr = lista_get(&shadow, idx);
+                if (!pr) { send_line(sock, "ERR idx\n"); }
+                else { char buf[256]; snprintf(buf, sizeof buf, "%d,%s,%c,%d\n", pr->id, pr->nombre, pr->Estado, pr->cantidad); send_line(sock, "OK "); send_line(sock, buf); }
             } else {
                 send_line(sock, "ERR Usar BEGIN primero\n");
                 continue;
@@ -137,24 +204,22 @@ void* client_thread(void* arg) {
 
         } else if (!strncmp(line, "ADD ", 4)) {
             if (!in_tx) { send_line(sock, "ERR Usar BEGIN primero\n"); continue; }
+            // txt expected as CSV line for a Producto
             char* txt = line + 4;
-            char** nuevo = realloc(shadow, sizeof(char*) * (shadow_n + 1));
-            if (!nuevo) { send_line(sock, "ERR mem\n"); continue; }
-            shadow = nuevo;
-            shadow[shadow_n++] = strdup(txt);
+            Producto pnew;
+            if (!leerProductoDeLineaCSV(txt, &pnew)) { send_line(sock, "ERR formato\n"); continue; }
+            if (poner_en_lista(&shadow, &pnew, sizeof(Producto)) != TODO_OK) { send_line(sock, "ERR mem\n"); continue; }
             send_line(sock, "OK ADD\n");
 
         } else if (!strncmp(line, "COMMIT TRANSACTION", 18)) {
             if (!in_tx) { send_line(sock, "ERR No hay transaccion\n"); continue; }
             // Persistimos con bloqueo exclusivo y swap in-memory
             pthread_mutex_lock(&g_productos_mutex);
-            if (persistir_csv_bloqueado_exclusivo(shadow, shadow_n) == 0) {
-                // Reemplazar en memoria
-                for (int i = 0; i < g_num_productos; i++) free(g_lista_productos[i]);
-                free(g_lista_productos);
+            if (persistir_csv_bloqueado_exclusivo_lista(&shadow) == 0) {
+                // Reemplazar en memoria: destruir la lista anterior y asignar la nueva
+                destruir_lista(&g_lista_productos);
                 g_lista_productos = shadow;
-                g_num_productos = shadow_n;
-                shadow = NULL; shadow_n = 0;
+                shadow = NULL;
                 pthread_mutex_unlock(&g_productos_mutex);
                 in_tx = false;
                 send_line(sock, "OK COMMIT TRANSACTION\n");
@@ -165,8 +230,7 @@ void* client_thread(void* arg) {
 
         } else if (!strncmp(line, "ROLLBACK", 8)) {
             if (!in_tx) { send_line(sock, "ERR No hay transaccion\n"); continue; }
-            for (int i = 0; i < shadow_n; i++) free(shadow[i]);
-            free(shadow); shadow = NULL; shadow_n = 0;
+            destruir_lista(&shadow); shadow = NULL;
             in_tx = false;
             send_line(sock, "OK ROLLBACK\n");
 
@@ -176,7 +240,7 @@ void* client_thread(void* arg) {
     }
 
     // Limpieza
-    if (shadow) { for (int i = 0; i < shadow_n; i++) free(shadow[i]); free(shadow); }
+    if (shadow) destruir_lista(&shadow);
     close(sock);
     sem_post(&g_sem_conc);
     return NULL;

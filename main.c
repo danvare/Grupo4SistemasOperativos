@@ -3,58 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h> // Necesario para srand
+#include "Producto.h"
 
 #define BATCH 10
 
 // Mutex para proteger la escritura en el archivo CSV
 pthread_mutex_t csv_mutex = PTHREAD_MUTEX_INITIALIZER;
 FILE *csv_file; // Puntero al archivo, será global para que los hilos lo vean
-
-typedef struct
-{
-    int id;
-    char Estado;
-    int cantidad;
-    char nombre[64];
-} Producto;
-
-
-// S: Stock
-// N: Sin stock
-// C: Critico
-// R: Reservado
-
-char obtenerEstado(int cantidadProd)
-{
-    char estado[4] = "SNCR";
-    switch (cantidadProd){
-        case 0: return estado[1];
-            break;
-        case 20: return estado[0];
-            break;
-        case 25: return estado[0];
-            break;
-        case 15: return estado[0];
-            break;
-        case 10: return estado[3];
-            break;
-        default: return estado[2];
-            break;
-    }
-}
-
-int opcionRandomCantidad()
-{
-    int cantidadAElegir[] = {10,20,25,15,5,2,1,0};
-    return cantidadAElegir[rand() % 8];
-}
-
-void opcionNombreRandom(char* destino)
-{
-    char nombres[][64] = {"Huevos\0","Manzanas\0","Aceite\0","Yerba Mate\0", "Agua\0"};
-
-    strcpy(destino,nombres[rand() % 5]);
-}
 
 typedef struct
 {
