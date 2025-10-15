@@ -263,11 +263,12 @@ void* client_thread(void* arg) {
                 }
             } else if (!strncmp(line, "GET ", 4)) {
                 int idx = atoi(line + 4);
-                Producto *pr;
-                if(!in_tx){
-                    pr = lista_get(&g_lista_productos, idx);
+                Producto buscar,*pr;
+                buscar.id = idx;
+                if(in_tx){
+                    pr = buscar_en_lista(&shadow, &buscar, sizeof(Producto), (Cmp)cmpId);
                 }else{
-                    pr = lista_get(&shadow, idx);
+                    pr = buscar_en_lista(&g_lista_productos, &buscar, sizeof(Producto), (Cmp)cmpId);
                 }
                 if (!pr) { send_line(sock, "ERR idx\n"); }
                 else { char buf[256]; snprintf(buf, sizeof buf, "%d,%s,%c,%d\n", pr->id, pr->nombre, pr->Estado, pr->cantidad); send_line(sock, "OK "); send_line(sock, buf); }
