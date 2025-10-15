@@ -321,34 +321,25 @@ void* client_thread(void* arg) {
                 send_line(sock, "OK UPDATE\n");
             } else if (!strncmp(line, "DELETE ", 7)) {
                 int idx = atoi(line + 7);
-                Producto *pr;
+                Producto pr;
+                pr.id = idx;
                 if(!in_tx){
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
                         continue;
                     }
-                    pr = lista_get(&g_lista_productos, idx);
-                    if (!pr) { send_line(sock, "ERR idx\n"); }
-                    else {
-                        // Eliminar de la lista
-                        // (implementar función lista_eliminar por id)
-                        if (lista_eliminar(&g_lista_productos, pr->id) == TODO_OK) {
-                            persistir_csv_bloqueado_exclusivo_lista(&g_lista_productos);
-                            send_line(sock, "OK DELETE\n");
-                        } else {
-                            send_line(sock, "ERR No se pudo eliminar\n");
-                        }
+                    // Eliminar de la lista
+                    // (implementar función lista_eliminar por id)
+                    if (lista_buscar_y_eliminar(&g_lista_productos, &pr, (Cmp)cmpId) == TODO_OK) {
+                        persistir_csv_bloqueado_exclusivo_lista(&g_lista_productos);
+                        send_line(sock, "OK DELETE\n");
+                    } else {
+                        send_line(sock, "ERR No se pudo eliminar, no se encontro el producto en la lista\n");
                     }
                 }else{
-                    pr = lista_get(&shadow, idx);
-                    if (!pr) { send_line(sock, "ERR idx\n"); }
-                    else {
-                        // Eliminar de la lista
-                        // (implementar función lista_eliminar por id)
-                        if (lista_eliminar(&shadow, pr->id) == TODO_OK) {
-                            send_line(sock, "OK DELETE\n");
-                        } else {
-                            send_line(sock, "ERR No se pudo eliminar\n");
-                        }
+                    if (lista_buscar_y_eliminar(&shadow, &pr, (Cmp)cmpId) == TODO_OK) {
+                        send_line(sock, "OK DELETE\n");
+                    } else {
+                        send_line(sock, "ERR No se pudo eliminar, no se encontro el producto en la lista\n");
                     }
                 }
             }else {

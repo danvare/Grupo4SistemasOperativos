@@ -129,3 +129,17 @@ int lista_contar(tLista * pl){
   }
   return cont;
 }
+
+int lista_buscar_y_eliminar(tLista * pl, void * pd, Cmp cmp){
+  tNodo * aux;
+  while(*pl && cmp((*pl)->info,pd)!=0){
+    pl = &(*pl)->sig;
+  }
+  if(*pl == NULL)
+    return ERROR;
+  aux = *pl;
+  *pl = (*pl)->sig;
+  free(aux->info);
+  free(aux);
+  return TODO_OK;
+}

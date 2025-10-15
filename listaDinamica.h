@@ -31,4 +31,5 @@ void* buscar_en_lista(tLista * pl, void * pd, unsigned tamDato, Cmp cmp);
 void recorrer_lista(tLista * pl, Accion accion);
 void copiar_lista(tLista * dest, tLista * src);
 int lista_contar(tLista * pl);
+int lista_buscar_y_eliminar(tLista * pl, void * pd, Cmp cmp);
 #endif //LISTADINAMICA_HEADER_NOT_INCLUDED
