@@ -4,3 +4,40 @@
 	<stdlib.h>
 	<pthread.h>
 
+1760497619 source:/home/jorge/Documents/SO-TP/Grupo4SistemasOperativos/Cliente-Servidor/main.c
+	<errno.h>
+	<fcntl.h>
+	<pthread.h>
+	<semaphore.h>
+	<stdint.h>
+	<stdbool.h>
+	<stdio.h>
+	<stdlib.h>
+	<string.h>
+	<sys/types.h>
+	<unistd.h>
+	"../Producto.h"
+	"../listaDinamica.h"
+	<sys/file.h>
+	<arpa/inet.h>
+	<netinet/in.h>
+	<sys/socket.h>
+	<winsock2.h>
+	<ws2tcpip.h>
+
+1760494319 /home/jorge/Documents/SO-TP/Grupo4SistemasOperativos/Producto.h
+	<string.h>
+	<stdio.h>
+	<stdlib.h>
+
+1760494338 /home/jorge/Documents/SO-TP/Grupo4SistemasOperativos/listaDinamica.h
+	<stdio.h>
+	<stdlib.h>
+	<string.h>
+
+1760497550 source:/home/jorge/Documents/SO-TP/Grupo4SistemasOperativos/listaDinamica.c
+	"listaDinamica.h"
+
+1760496916 source:/home/jorge/Documents/SO-TP/Grupo4SistemasOperativos/Producto.c
+	"Producto.h"
+

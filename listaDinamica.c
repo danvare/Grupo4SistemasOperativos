@@ -6,11 +6,11 @@ void crear_lista(tLista * pl){
 
 int poner_en_lista(tLista * pl, const void * pd,unsigned tamDato){
   tNodo * nue = NULL;
-  if((nue = malloc(sizeof(tNodo))) == NULL || (nue->info = malloc(sizeof(tamDato))) == NULL){
+  if((nue = malloc(sizeof(tNodo))) == NULL || (nue->info = malloc(tamDato)) == NULL){
     free(nue);
     return ERR_MEM;
   }
-  mempcpy(nue->info,pd,sizeof(tamDato));
+  mempcpy(nue->info,pd,tamDato);
   nue->tamInfo = tamDato;
   nue->sig = *pl;
   *pl = nue;
@@ -63,7 +63,7 @@ int sacar_ultimo_lista(tLista * pl,void * pd, unsigned tamDato){
     if(cmp((*pl)->info,(*pl)->sig->info)>0){
       q = pri;
       aux = (*pl)->sig;
-      
+
       while(*q && cmp((*pl)->info,(*pl)->sig->info)>0)
         q = &(*q)->sig;
       aux->sig = *q;
@@ -78,12 +78,12 @@ int sacar_ultimo_lista(tLista * pl,void * pd, unsigned tamDato){
 int poner_ordenado_lista(tLista * pl, void * pd, unsigned tamDato, Cmp cmp){
 
   tNodo * nue = NULL;
-  
+
   while(*pl && cmp((*pl)->info,pd)<0){
     pl = &(*pl)->sig;
   }
 
-  
+
   if((nue = malloc(sizeof(tNodo))) == NULL || (nue->info = malloc(sizeof(tamDato))) == NULL){
     free(nue);
     return ERR_MEM;
@@ -93,7 +93,7 @@ int poner_ordenado_lista(tLista * pl, void * pd, unsigned tamDato, Cmp cmp){
   nue->tamInfo = tamDato;
   nue->sig = *pl;
   *pl = nue;
-  
+
   return TODO_OK;
 }
 

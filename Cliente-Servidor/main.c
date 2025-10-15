@@ -24,17 +24,14 @@
 #include <ws2tcpip.h>
 #endif
 
-// ====== Estado global (reutiliza tu loader) ======
+// ====== Estado global ======
 tLista g_lista_productos = NULL;
 pthread_mutex_t g_productos_mutex;   // protege memoria en COMMIT
-sem_t g_sem_conc,g_sem_trans;                    // limita concurrencia real
-unsigned max_transacciones = 1; // solo 1 transaccion a la vez
+sem_t g_sem_conc, g_sem_trans;      // limita concurrencia real
+unsigned max_transacciones = 1;     // solo 1 transaccion a la vez
 const char* NOMBRE_ARCHIVO = "productos.csv";
 
-// Use the list API from listaDinamica: poner_en_lista already inserts appropriately
-
-
-// Cargar productos en una lista dinámica (tLista) usando las funciones del módulo listaDinamica
+// ====== Carga inicial ======
 int cargar_productos_en_lista(tLista *pl) {
     int conteoLineas = 0;
     char linea[1024];
@@ -45,13 +42,10 @@ int cargar_productos_en_lista(tLista *pl) {
 
     crear_lista(pl);
 
-
     while (fgets(linea, sizeof linea, f)) {
         if (leerProductoDeLineaCSV(linea, &prod)) {
-            prod.linea = conteoLineas;
-            conteoLineas++;
+            prod.linea = conteoLineas++;
             if (poner_en_lista(pl, &prod, sizeof(Producto)) != TODO_OK) {
-                // fallo memoria: limpiar y salir
                 destruir_lista(pl);
                 fclose(f);
                 return 0;
@@ -63,22 +57,23 @@ int cargar_productos_en_lista(tLista *pl) {
     return 1;
 }
 
+// ====== Persistencia ======
 static int persistir_csv_bloqueado_exclusivo_lista(tLista *pl) {
     int fd = open(NOMBRE_ARCHIVO, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { perror("open"); return -1; }
 #ifdef __linux__
     if (flock(fd, LOCK_EX) < 0) { perror("flock LOCK_EX"); close(fd); return -1; }
 #endif
-
-    // Escribimos atómicamente todo
     FILE* f = fdopen(fd, "w");
-    if (!f) { perror("fdopen");
+    if (!f) {
+        perror("fdopen");
 #ifdef __linux__
         flock(fd, LOCK_UN);
 #endif
-        close(fd); return -1; }
+        close(fd);
+        return -1;
+    }
 
-    // iterar la lista y escribir cada producto
     tNodo *p = *pl;
     while (p) {
         Producto *pr = (Producto*)p->info;
@@ -88,38 +83,36 @@ static int persistir_csv_bloqueado_exclusivo_lista(tLista *pl) {
 
     fflush(f);
     fsync(fd);
-    // Desbloqueo y cierre
 #ifdef __linux__
     flock(fd, LOCK_UN);
 #endif
-    fclose(f); // cierra también fd
+    fclose(f);
     return 0;
 }
 
 static int persistir_prod_csv_bloqueado_exclusivo(Producto *pr) {
-    int fd = open(NOMBRE_ARCHIVO, O_APPEND, 0644);
+    int fd = open(NOMBRE_ARCHIVO, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) { perror("open"); return -1; }
 #ifdef __linux__
     if (flock(fd, LOCK_EX) < 0) { perror("flock LOCK_EX"); close(fd); return -1; }
 #endif
-
-    // Escribimos atómicamente todo
     FILE* f = fdopen(fd, "a");
-    if (!f) { perror("fdopen");
+    if (!f) {
+        perror("fdopen");
 #ifdef __linux__
         flock(fd, LOCK_UN);
 #endif
-        close(fd); return -1; }
+        close(fd);
+        return -1;
+    }
 
-        escribirProductoEnCSV(f, pr);
-
+    escribirProductoEnCSV(f, pr);
     fflush(f);
     fsync(fd);
-    // Desbloqueo y cierre
 #ifdef __linux__
     flock(fd, LOCK_UN);
 #endif
-    fclose(f); // cierra también fd
+    fclose(f);
     return 0;
 }
 
@@ -140,22 +133,19 @@ static int recv_line(int sock, char* buf, size_t cap) {
     return (int)i;
 }
 
-static int sem_wait_timeout(sem_t *sem,int sock, bool in_tx) {
-    int cont=0; 
-    if(in_tx) return 1; // ya tiene el semáforo
-    while (sem_trywait(sem) != 0 && cont<=5) {
+// Toma el semáforo con timeout simple (5s). Si está en TX, ya tiene el token.
+static int sem_wait_timeout(sem_t *sem, int sock, bool in_tx) {
+    if (in_tx) return 1;
+    int cont = 0;
+    while (sem_trywait(sem) != 0 && cont < 5) {
         cont++;
-        sleep(1); // esperar a que haya un token disponible
+        sleep(1);
     }
-    // si pasaron más de 5 segundos, rechazamos la operación
-    if(cont>5){
+    if (cont == 5) {
         send_line(sock, "ERR Servidor ocupado, intente luego\n");
-        return 0;
-    }else{
-        sem_post(&g_sem_trans);
-        return 1; // ok
+        return 0; // no adquirido
     }
-
+    return 1; // adquirido (el caller debe soltarlo si !in_tx)
 }
 
 static int mutex_lock_timeout(pthread_mutex_t *mutex, int sock) {
@@ -170,49 +160,49 @@ static int mutex_lock_timeout(pthread_mutex_t *mutex, int sock) {
     }
     return 1; // ok
 }
+
 // ====== Thread por cliente ======
-typedef struct {
-    int sock;
-} client_args_t;
+typedef struct { int sock; } client_args_t;
 
 void* client_thread(void* arg) {
     client_args_t* a = (client_args_t*)arg;
     int sock = a->sock;
-    int sem_val,cont=0;
     free(a);
 
-    // Control de concurrencia real
+    // limitar número real de clientes
     sem_wait(&g_sem_conc);
 
-    // Estado de transacción por cliente (snapshot como tLista)
     bool in_tx = false;
-    tLista shadow = NULL; // lista temporal de Producto
+    tLista shadow = NULL;
 
-    send_line(sock, "Bienvenido. Comandos: BEGIN, GET idx, LIST, ADD texto, COMMIT TRANSACTION, ROLLBACK, QUIT\n");
+    send_line(sock, "Bienvenido. Comandos: BEGIN, GET idx, LIST, ADD texto, COMMIT TRANSACTION, ROLLBACK, DELETE id, QUIT\n");
+
+    // helper para liberar el token de transacción si no estamos en TX
+    #define RELEASE_IF_NONTX() do { if (!in_tx) sem_post(&g_sem_trans); } while(0)
 
     char line[2048];
     while (1) {
         int n = recv_line(sock, line, sizeof(line));
         if (n <= 0) break;
 
-        // Normalizamos
         if (!strncmp(line, "QUIT", 4)) {
             send_line(sock, "OK Bye\n");
             break;
+
         } else if (!strncmp(line, "BEGIN", 5)) {
             if (in_tx) { send_line(sock, "ERR Ya en transaccion\n"); continue; }
+            // 1) tomar el token de transacción
+            if (sem_wait_timeout(&g_sem_trans, sock, false) == 0) { continue; }
+            // 2) tomar el mutex y preparar snapshot
             pthread_mutex_lock(&g_productos_mutex);
-            // Crear snapshot de trabajo (lecturas y cambios locales)
             crear_lista(&shadow);
             copiar_lista(&shadow, &g_lista_productos);
-            sem_wait(&g_sem_trans);
             send_line(sock, "OK BEGIN\n");
             in_tx = true;
+
         } else if (!strncmp(line, "COMMIT TRANSACTION", 18)) {
             if (!in_tx) { send_line(sock, "ERR No hay transaccion\n"); continue; }
-            // Persistimos con bloqueo exclusivo y swap in-memory
             if (persistir_csv_bloqueado_exclusivo_lista(&shadow) == 0) {
-                // Reemplazar en memoria: destruir la lista anterior y asignar la nueva
                 destruir_lista(&g_lista_productos);
                 g_lista_productos = shadow;
                 shadow = NULL;
@@ -231,52 +221,56 @@ void* client_thread(void* arg) {
             pthread_mutex_unlock(&g_productos_mutex);
             sem_post(&g_sem_trans);
             send_line(sock, "OK ROLLBACK\n");
-            
+
         } else {
-            if (sem_wait_timeout(&g_sem_trans, sock, in_tx) == 0) {
-                continue; // no pudo obtener el semáforo
-            }
+            // comandos fuera de TX toman token con timeout
+            if (sem_wait_timeout(&g_sem_trans, sock, in_tx) == 0) continue;
 
             if (!strncmp(line, "LIST", 4)) {
+                int cnt = 0;
+                tNodo *p = in_tx ? shadow : g_lista_productos;
+
+                for (tNodo *q = p; q; q = q->sig) cnt++;  // conteo NO destructivo
+
                 char msg[64];
-                int cnt;
-                tNodo *p;
+                snprintf(msg, sizeof msg, "OK %d items \n", cnt);
+                send_line(sock, msg);
 
-                if(in_tx){
-                    cnt = lista_contar(&shadow);
-                    p = shadow;
-                }else{
-                    cnt = lista_contar(&g_lista_productos);
-                    p = g_lista_productos;
-                }
-
-                snprintf(msg, sizeof msg, "OK %d items \n", cnt); send_line(sock, msg);
-
-                for (p; p != NULL; p = p->sig) {
+                for (; p != NULL; p = p->sig) {
                     Producto *pr = (Producto*)p->info;
                     if (pr) {
                         char buf[256];
-                        // formatear como CSV (mismo formato que escribirProductoEnCSV)
-                        snprintf(buf, sizeof buf, "%d,%s,%c,%d\n", pr->id, pr->nombre, pr->Estado, pr->cantidad);
+                        snprintf(buf, sizeof buf, "%d,%s,%c,%d\n",
+                                 pr->id, pr->nombre, pr->Estado, pr->cantidad);
                         send_line(sock, buf);
                     }
                 }
+                RELEASE_IF_NONTX();
+
             } else if (!strncmp(line, "GET ", 4)) {
                 int idx = atoi(line + 4);
-                Producto buscar,*pr;
+                Producto buscar, *pr;
                 buscar.id = idx;
-                if(in_tx){
+                if (in_tx)
                     pr = buscar_en_lista(&shadow, &buscar, sizeof(Producto), (Cmp)cmpId);
-                }else{
+                else
                     pr = buscar_en_lista(&g_lista_productos, &buscar, sizeof(Producto), (Cmp)cmpId);
+
+                if (!pr) send_line(sock, "ERR idx\n");
+                else {
+                    char buf[256];
+                    snprintf(buf, sizeof buf, "%d,%s,%c,%d\n",
+                             pr->id, pr->nombre, pr->Estado, pr->cantidad);
+                    send_line(sock, "OK "); send_line(sock, buf);
                 }
-                if (!pr) { send_line(sock, "ERR idx\n"); }
-                else { char buf[256]; snprintf(buf, sizeof buf, "%d,%s,%c,%d\n", pr->id, pr->nombre, pr->Estado, pr->cantidad); send_line(sock, "OK "); send_line(sock, buf); }
+                RELEASE_IF_NONTX();
+
             } else if (!strncmp(line, "ADD ", 4)) {
                 char* txt = line + 4;
                 Producto pnew;
                 if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
+                        RELEASE_IF_NONTX();
                         continue;
                     }
                     leerProductoDeLineaCSV(txt, &pnew);
@@ -288,11 +282,14 @@ void* client_thread(void* arg) {
                     poner_en_lista(&shadow, &pnew, sizeof(Producto));
                 }
                 send_line(sock, "OK ADD\n");
+                RELEASE_IF_NONTX();
+
             } else if (!strncmp(line, "UPDATE ", 7)) {
                 char* txt = line + 7;
                 Producto pnew;
                 if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
+                        RELEASE_IF_NONTX();
                         continue;
                     }
                     leerProductoDeLineaCSV(txt, &pnew);
@@ -300,9 +297,9 @@ void* client_thread(void* arg) {
                     if (!exist) {
                         pthread_mutex_unlock(&g_productos_mutex);
                         send_line(sock, "ERR No existe ID\n");
+                        RELEASE_IF_NONTX();
                         continue;
                     }
-                    // Actualizar campos
                     exist->cantidad = pnew.cantidad;
                     exist->Estado = pnew.Estado;
                     persistir_csv_bloqueado_exclusivo_lista(&g_lista_productos);
@@ -312,47 +309,56 @@ void* client_thread(void* arg) {
                     Producto *exist = buscar_en_lista(&shadow, &pnew, sizeof(Producto), (Cmp)cmpId);
                     if (!exist) {
                         send_line(sock, "ERR No existe ID\n");
+                        RELEASE_IF_NONTX();
                         continue;
                     }
-                    // Actualizar campos
                     exist->cantidad = pnew.cantidad;
                     exist->Estado = pnew.Estado;
                 }
                 send_line(sock, "OK UPDATE\n");
+                RELEASE_IF_NONTX();
+
             } else if (!strncmp(line, "DELETE ", 7)) {
                 int idx = atoi(line + 7);
-                Producto pr;
-                pr.id = idx;
-                if(!in_tx){
+                Producto pr; pr.id = idx;
+                if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
+                        RELEASE_IF_NONTX();
                         continue;
                     }
-                    // Eliminar de la lista
-                    // (implementar función lista_eliminar por id)
                     if (lista_buscar_y_eliminar(&g_lista_productos, &pr, (Cmp)cmpId) == TODO_OK) {
                         persistir_csv_bloqueado_exclusivo_lista(&g_lista_productos);
                         send_line(sock, "OK DELETE\n");
                     } else {
                         send_line(sock, "ERR No se pudo eliminar, no se encontro el producto en la lista\n");
                     }
-                }else{
-                    if (lista_buscar_y_eliminar(&shadow, &pr, (Cmp)cmpId) == TODO_OK) {
+                    pthread_mutex_unlock(&g_productos_mutex);
+                    RELEASE_IF_NONTX();
+                } else {
+                    if (lista_buscar_y_eliminar(&shadow, &pr, (Cmp)cmpId) == TODO_OK)
                         send_line(sock, "OK DELETE\n");
-                    } else {
+                    else
                         send_line(sock, "ERR No se pudo eliminar, no se encontro el producto en la lista\n");
-                    }
                 }
-            }else {
+
+            } else {
                 send_line(sock, "ERR Comando\n");
+                RELEASE_IF_NONTX();
             }
         }
     }
 
-    if(in_tx){
+    // Limpieza robusta si el cliente se va en mitad de TX
+    if (in_tx) {
         pthread_mutex_unlock(&g_productos_mutex);
+        sem_post(&g_sem_trans);
+        if (shadow) destruir_lista(&shadow);
+        shadow = NULL;
+        in_tx = false;
+    } else {
+        if (shadow) destruir_lista(&shadow);
     }
-        // Limpieza
-    if (shadow) destruir_lista(&shadow);
+
     close(sock);
     sem_post(&g_sem_conc);
     return NULL;
@@ -386,7 +392,6 @@ int main() {
     pthread_mutex_init(&g_productos_mutex, NULL);
     if (!cargar_productos_en_lista(&g_lista_productos)) return 1;
 
-    // Semáforo de concurrencia real
     sem_init(&g_sem_conc, 0, (unsigned)max_concurrentes);
     sem_init(&g_sem_trans, 0, max_transacciones);
 
@@ -401,12 +406,11 @@ int main() {
         client_args_t* a = malloc(sizeof *a);
         a->sock = cs;
         pthread_t th; pthread_create(&th, NULL, client_thread, a);
-        pthread_detach(th); // no acumulamos joins
+        pthread_detach(th);
     }
 
     sem_destroy(&g_sem_conc);
     sem_destroy(&g_sem_trans);
     close(srv);
-    // (Nunca llegamos acá en este demo) Ja
     return 0;
 }

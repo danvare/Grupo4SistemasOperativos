@@ -26,7 +26,7 @@ void escribirProductoEnCSV(FILE* archivo, Producto* prod)
 
 Producto* leerProductoDeLineaCSV(char* linea, Producto* prod)
 {
-    if (sscanf(linea, "%d,%63[^,],%c,%d\n", &prod->id, prod->nombre, &prod->Estado, &prod->cantidad) == 4)
+    if (sscanf(linea, "%d,%63[^,],%c,%d", &prod->id, prod->nombre, &prod->Estado, &prod->cantidad) == 4)
     {
         return prod;
     }
@@ -45,5 +45,6 @@ int cmpId(const void* a, const void* b)
 
 void printProducto(const void* p) {
     const Producto* prod = (const Producto*)p;
-    snprintf(stdout, 256, "ID: %d, Nombre: %s, Estado: %c, Cantidad: %d\n", prod->id, prod->nombre, prod->Estado, prod->cantidad);
+    printf("ID: %d, Nombre: %s, Estado: %c, Cantidad: %d\n",
+           prod->id, prod->nombre, prod->Estado, prod->cantidad);
 }
