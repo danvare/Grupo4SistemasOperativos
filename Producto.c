@@ -42,3 +42,8 @@ int cmpId(const void* a, const void* b)
     if (prodA->id > prodB->id) return 1;
     return 0;
 }
+
+void printProducto(const void* p) {
+    const Producto* prod = (const Producto*)p;
+    snprintf(stdout, 256, "ID: %d, Nombre: %s, Estado: %c, Cantidad: %d\n", prod->id, prod->nombre, prod->Estado, prod->cantidad);
+}

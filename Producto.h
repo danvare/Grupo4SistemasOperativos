@@ -7,6 +7,7 @@
 typedef struct {
   int id;
   char Estado;
+  unsigned linea; // línea en el CSV
   int cantidad;
   char nombre[64];
 } Producto;
@@ -19,8 +20,9 @@ typedef struct {
 char obtenerEstado(int cantidadProd);
 int opcionRandomCantidad();
 void opcionNombreRandom(char* destino);
-void escribirProductoEnCSV(FILE* archivo, Producto* prod);
+void escribirProductoEnCSV(FILE* archivo, Producto* prod); 
 Producto* leerProductoDeLineaCSV(char* linea, Producto* prod);
-int cmp(const void* a, const void* b);
+int cmpId(const void* a, const void* b);
+void printProducto(const void* p);
 
 #endif

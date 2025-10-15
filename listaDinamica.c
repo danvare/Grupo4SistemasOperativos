@@ -105,3 +105,27 @@ void * buscar_en_lista(tLista * pl, void * pd, unsigned tamDato, Cmp cmp){
     return (*pl)->info;
   return NULL;
 }
+
+void recorrer_lista(tLista * pl, Accion accion){
+  while(*pl){
+    accion((*pl)->info);
+    pl = &(*pl)->sig;
+  }
+}
+
+void copiar_lista(tLista * dest, tLista * src){
+  tNodo * aux = *src;
+  while(aux){
+    poner_en_lista(dest,aux->info,aux->tamInfo);
+    aux = aux->sig;
+  }
+}
+
+int lista_contar(tLista * pl){
+  int cont = 0;
+  while(*pl){
+    cont++;
+    pl = &(*pl)->sig;
+  }
+  return cont;
+}
