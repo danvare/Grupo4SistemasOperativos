@@ -170,7 +170,6 @@ void* client_thread(void* arg) {
     free(a);
 
     // limitar número real de clientes
-    sem_wait(&g_sem_conc);
 
     bool in_tx = false;
     tLista shadow = NULL;
@@ -405,6 +404,7 @@ int main() {
 
         client_args_t* a = malloc(sizeof *a);
         a->sock = cs;
+        sem_wait(&g_sem_conc);
         pthread_t th; pthread_create(&th, NULL, client_thread, a);
         pthread_detach(th);
     }
