@@ -17,7 +17,7 @@ typedef struct {
 // C: Critico
 // R: Reservado
 
-char obtenerEstado(int cantidadProd);
+char obtenerEstado();
 int opcionRandomCantidad();
 void opcionNombreRandom(char* destino);
 void escribirProductoEnCSV(FILE* archivo, Producto* prod); 

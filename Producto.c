@@ -1,8 +1,8 @@
 #include "Producto.h"
 
-char obtenerEstado(int cantidadProd)
+char obtenerEstado()
 {
-    char estado[4] = "SNCR";
+    char estado[] = "SNCR";
     return estado[rand() % 4];
 }
 

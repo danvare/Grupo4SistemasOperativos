@@ -68,8 +68,7 @@ void* generador(void* p)
             long id = bloque[i];
             prod.id = id;
             prod.cantidad = opcionRandomCantidad();
-            prod.Estado =
-            (prod.cantidad);
+            prod.Estado = obtenerEstado();
             opcionNombreRandom(prod.nombre);
 
 
