@@ -1,5 +1,4 @@
 // gcc -pthread server.c -o server
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -27,7 +26,7 @@
 // ====== Estado global ======
 tLista g_lista_productos = NULL;
 pthread_mutex_t g_productos_mutex;   // protege memoria en COMMIT
-sem_t g_sem_conc, g_sem_trans;      // limita concurrencia real
+sem_t g_sem_conc;      // limita concurrencia real
 unsigned max_transacciones = 1;     // solo 1 transaccion a la vez
 const char* NOMBRE_ARCHIVO = "productos.csv";
 
@@ -133,28 +132,14 @@ static int recv_line(int sock, char* buf, size_t cap) {
     return (int)i;
 }
 
-// Toma el semáforo con timeout simple (5s). Si está en TX, ya tiene el token.
-static int sem_wait_timeout(sem_t *sem, int sock, bool in_tx) {
-    if (in_tx) return 1;
-    int cont = 0;
-    while (sem_trywait(sem) != 0 && cont < 5) {
-        cont++;
-        sleep(1);
-    }
-    if (cont == 5) {
-        send_line(sock, "ERR Servidor ocupado, intente luego\n");
-        return 0; // no adquirido
-    }
-    return 1; // adquirido (el caller debe soltarlo si !in_tx)
-}
 
 static int mutex_lock_timeout(pthread_mutex_t *mutex, int sock) {
     int cont = 0;
-    while (pthread_mutex_trylock(mutex) != 0 && cont < 5) {
+    while (pthread_mutex_trylock(mutex) != 0 && cont < 30) {
         cont++;
         sleep(1);
     }
-    if (cont == 5){
+    if (cont == 30){
         send_line(sock, "ERR Servidor ocupado, intente luego\n");
         return 0; // timeout
     }
@@ -176,11 +161,10 @@ void* client_thread(void* arg) {
 
     send_line(sock, "Bienvenido. Comandos: BEGIN, GET idx, LIST, ADD texto, COMMIT TRANSACTION, ROLLBACK, DELETE id, QUIT\n");
 
-    // helper para liberar el token de transacción si no estamos en TX
-    #define RELEASE_IF_NONTX() do { if (!in_tx) sem_post(&g_sem_trans); } while(0)
 
     char line[2048];
     while (1) {
+        //Revisa si el cliente sigue conectado
         int n = recv_line(sock, line, sizeof(line));
         if (n <= 0) break;
 
@@ -190,9 +174,6 @@ void* client_thread(void* arg) {
 
         } else if (!strncmp(line, "BEGIN", 5)) {
             if (in_tx) { send_line(sock, "ERR Ya en transaccion\n"); continue; }
-            // 1) tomar el token de transacción
-            if (sem_wait_timeout(&g_sem_trans, sock, false) == 0) { continue; }
-            // 2) tomar el mutex y preparar snapshot
             pthread_mutex_lock(&g_productos_mutex);
             crear_lista(&shadow);
             copiar_lista(&shadow, &g_lista_productos);
@@ -211,19 +192,22 @@ void* client_thread(void* arg) {
                 send_line(sock, "ERR COMMIT TRANSACTION\n");
             }
             pthread_mutex_unlock(&g_productos_mutex);
-            sem_post(&g_sem_trans);
 
         } else if (!strncmp(line, "ROLLBACK", 8)) {
             if (!in_tx) { send_line(sock, "ERR No hay transaccion\n"); continue; }
             destruir_lista(&shadow); shadow = NULL;
             in_tx = false;
             pthread_mutex_unlock(&g_productos_mutex);
-            sem_post(&g_sem_trans);
             send_line(sock, "OK ROLLBACK\n");
 
         } else {
-            // comandos fuera de TX toman token con timeout
-            if (sem_wait_timeout(&g_sem_trans, sock, in_tx) == 0) continue;
+            if(!in_tx){
+                if(mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
+                    continue;
+                }else{
+                    pthread_mutex_unlock(&g_productos_mutex);
+                }
+            }
 
             if (!strncmp(line, "LIST", 4)) {
                 int cnt = 0;
@@ -244,7 +228,6 @@ void* client_thread(void* arg) {
                         send_line(sock, buf);
                     }
                 }
-                RELEASE_IF_NONTX();
 
             } else if (!strncmp(line, "GET ", 4)) {
                 int idx = atoi(line + 4);
@@ -262,33 +245,43 @@ void* client_thread(void* arg) {
                              pr->id, pr->nombre, pr->Estado, pr->cantidad);
                     send_line(sock, "OK "); send_line(sock, buf);
                 }
-                RELEASE_IF_NONTX();
 
             } else if (!strncmp(line, "ADD ", 4)) {
                 char* txt = line + 4;
-                Producto pnew;
+                Producto pnew, *pExiste;
+                leerProductoDeLineaCSV(txt, &pnew);
                 if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
-                        RELEASE_IF_NONTX();
                         continue;
                     }
-                    leerProductoDeLineaCSV(txt, &pnew);
                     persistir_prod_csv_bloqueado_exclusivo(&pnew);
-                    poner_en_lista(&g_lista_productos, &pnew, sizeof(Producto));
-                    pthread_mutex_unlock(&g_productos_mutex);
+                    pExiste = buscar_en_lista(&g_lista_productos, &pnew, sizeof(Producto), (Cmp)cmpId);
+                    if (pExiste) {
+                        pthread_mutex_unlock(&g_productos_mutex);
+                        send_line(sock, "ERR Ya existe ID\n");
+                        continue;
+                    }else{
+                        poner_en_lista(&g_lista_productos, &pnew, sizeof(Producto));
+                        pthread_mutex_unlock(&g_productos_mutex);
+                    }
                 } else {
-                    leerProductoDeLineaCSV(txt, &pnew);
-                    poner_en_lista(&shadow, &pnew, sizeof(Producto));
+                    pExiste = buscar_en_lista(&shadow, &pnew, sizeof(Producto), (Cmp)cmpId);
+                    if (pExiste) {
+                        send_line(sock, "ERR Ya existe ID\n");
+                        continue;
+                    }else{
+                        leerProductoDeLineaCSV(txt, &pnew);
+                        poner_en_lista(&shadow, &pnew, sizeof(Producto));
+                    }
+                   
                 }
                 send_line(sock, "OK ADD\n");
-                RELEASE_IF_NONTX();
 
             } else if (!strncmp(line, "UPDATE ", 7)) {
                 char* txt = line + 7;
                 Producto pnew;
                 if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
-                        RELEASE_IF_NONTX();
                         continue;
                     }
                     leerProductoDeLineaCSV(txt, &pnew);
@@ -296,7 +289,6 @@ void* client_thread(void* arg) {
                     if (!exist) {
                         pthread_mutex_unlock(&g_productos_mutex);
                         send_line(sock, "ERR No existe ID\n");
-                        RELEASE_IF_NONTX();
                         continue;
                     }
                     exist->cantidad = pnew.cantidad;
@@ -308,21 +300,18 @@ void* client_thread(void* arg) {
                     Producto *exist = buscar_en_lista(&shadow, &pnew, sizeof(Producto), (Cmp)cmpId);
                     if (!exist) {
                         send_line(sock, "ERR No existe ID\n");
-                        RELEASE_IF_NONTX();
                         continue;
                     }
                     exist->cantidad = pnew.cantidad;
                     exist->Estado = pnew.Estado;
                 }
                 send_line(sock, "OK UPDATE\n");
-                RELEASE_IF_NONTX();
 
             } else if (!strncmp(line, "DELETE ", 7)) {
                 int idx = atoi(line + 7);
                 Producto pr; pr.id = idx;
                 if (!in_tx) {
                     if (mutex_lock_timeout(&g_productos_mutex, sock) == 0) {
-                        RELEASE_IF_NONTX();
                         continue;
                     }
                     if (lista_buscar_y_eliminar(&g_lista_productos, &pr, (Cmp)cmpId) == TODO_OK) {
@@ -332,7 +321,6 @@ void* client_thread(void* arg) {
                         send_line(sock, "ERR No se pudo eliminar, no se encontro el producto en la lista\n");
                     }
                     pthread_mutex_unlock(&g_productos_mutex);
-                    RELEASE_IF_NONTX();
                 } else {
                     if (lista_buscar_y_eliminar(&shadow, &pr, (Cmp)cmpId) == TODO_OK)
                         send_line(sock, "OK DELETE\n");
@@ -342,7 +330,6 @@ void* client_thread(void* arg) {
 
             } else {
                 send_line(sock, "ERR Comando\n");
-                RELEASE_IF_NONTX();
             }
         }
     }
@@ -350,7 +337,6 @@ void* client_thread(void* arg) {
     // Limpieza robusta si el cliente se va en mitad de TX
     if (in_tx) {
         pthread_mutex_unlock(&g_productos_mutex);
-        sem_post(&g_sem_trans);
         if (shadow) destruir_lista(&shadow);
         shadow = NULL;
         in_tx = false;
@@ -392,7 +378,6 @@ int main() {
     if (!cargar_productos_en_lista(&g_lista_productos)) return 1;
 
     sem_init(&g_sem_conc, 0, (unsigned)max_concurrentes);
-    sem_init(&g_sem_trans, 0, max_transacciones);
 
     int srv = crear_listen_socket((uint16_t)puerto, max_espera);
     printf("Servidor escuchando en 0.0.0.0:%d  (concurrencia=%d, backlog=%d)\n", puerto, max_concurrentes, max_espera);
@@ -413,7 +398,6 @@ int main() {
     }
 
     sem_destroy(&g_sem_conc);
-    sem_destroy(&g_sem_trans);
     close(srv);
     return 0;
 }
