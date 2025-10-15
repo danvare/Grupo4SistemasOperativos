@@ -399,12 +399,15 @@ int main() {
 
     while (1) {
         struct sockaddr_in cli; socklen_t l = sizeof(cli);
+        
+        sem_wait(&g_sem_conc);
+
         int cs = accept(srv, (struct sockaddr*)&cli, &l);
         if (cs < 0) { if (errno == EINTR) continue; perror("accept"); break; }
 
         client_args_t* a = malloc(sizeof *a);
         a->sock = cs;
-        sem_wait(&g_sem_conc);
+
         pthread_t th; pthread_create(&th, NULL, client_thread, a);
         pthread_detach(th);
     }
